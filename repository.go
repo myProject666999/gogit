@@ -209,10 +209,6 @@ func (r *Repository) setWorktreeAndStoragePaths() error {
 		return nil
 	}
 
-	type fsBased interface {
-		Filesystem() billy.Filesystem
-	}
-
 	// .git file is only created if the storage is file based and the file
 	// system is osfs.OS
 	fs, isFSBased := r.Storer.(fsBased)
@@ -296,7 +292,15 @@ func Open(s storage.Storer, worktree billy.Filesystem) (*Repository, error) {
 		return nil, err
 	}
 
-	return newRepository(s, worktree), nil
+	r := newRepository(s, worktree)
+
+	// A partial clone reads objects its promisor remote withheld; wrap the
+	// storer so those reads fetch on demand instead of failing.
+	if err := r.enablePartialCloneBackfill(); err != nil {
+		return nil, err
+	}
+
+	return r, nil
 }
 
 // Clone a repository into the given Storer and worktree Filesystem with the
@@ -1162,6 +1166,13 @@ func (r *Repository) clone(ctx context.Context, o *CloneOptions) error {
 		return err
 	}
 
+	// A filtered clone left objects with the promisor remote; the checkout
+	// below already needs some of them, so backfill has to be in place
+	// before the worktree is materialised.
+	if err := r.enablePartialCloneBackfill(); err != nil {
+		return err
+	}
+
 	err = r.setWorktreeAndStoragePaths()
 	if err != nil {
 		return err
@@ -1440,7 +1451,17 @@ func (r *Repository) FetchContext(ctx context.Context, o *FetchOptions) error {
 		return err
 	}
 
-	return remote.FetchContext(ctx, o)
+	err = remote.FetchContext(ctx, o)
+	if err != nil && !errors.Is(err, NoErrAlreadyUpToDate) {
+		return err
+	}
+
+	// A filtered fetch records the promisor remote it came from; enable
+	// lazy backfill so later reads of the withheld objects can fetch them.
+	if berr := r.enablePartialCloneBackfill(); berr != nil && err == nil {
+		err = berr
+	}
+	return err
 }
 
 // Push performs a push to the remote. Returns NoErrAlreadyUpToDate if

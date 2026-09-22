@@ -766,6 +766,10 @@ func (w *Worktree) resetWorktreeToTree(cfg *config.Config, fromTree, toTree *obj
 		return err
 	}
 
+	if err := w.prefetchMissingBlobs(toTree, worktreeChanges, filesMap); err != nil {
+		return err
+	}
+
 	idx, err := w.r.Storer.Index()
 	if err != nil {
 		return err
@@ -836,6 +840,11 @@ func (w *Worktree) resetWorktree(cfg *config.Config, t *object.Tree, files []str
 		return err
 	}
 
+	filesMap := buildFilePathMap(files)
+	if err := w.prefetchMissingBlobs(t, changes, filesMap); err != nil {
+		return err
+	}
+
 	idx, err := w.r.Storer.Index()
 	if err != nil {
 		return err
@@ -845,7 +854,6 @@ func (w *Worktree) resetWorktree(cfg *config.Config, t *object.Tree, files []str
 	fs, closeFS := w.reusableRootFS()
 	defer closeFS()
 
-	filesMap := buildFilePathMap(files)
 	for _, ch := range changes {
 		if len(files) > 0 {
 			file := ""
@@ -872,6 +880,46 @@ func (w *Worktree) resetWorktree(cfg *config.Config, t *object.Tree, files []str
 
 	b.Write(idx)
 	return w.r.Storer.SetIndex(idx)
+}
+
+// prefetchMissingBlobs fetches, in a single batch, the blobs that applying
+// the given changes will read from the object database but the repository
+// does not have. It only does anything in a partial clone, where those blobs
+// sit with the promisor remote; elsewhere every object is local and the call
+// is a no-op. Batching matters: one checkout can touch thousands of blobs,
+// and fetching them one read at a time would mean one network round trip
+// each, which is why git checkout prefetches its missing objects the same
+// way before materialising files.
+func (w *Worktree) prefetchMissingBlobs(t *object.Tree, changes merkletrie.Changes, filesMap map[string]struct{}) error {
+	var hashes []plumbing.Hash
+	for _, ch := range changes {
+		a, err := ch.Action()
+		if err != nil {
+			return err
+		}
+		if a != merkletrie.Insert && a != merkletrie.Modify {
+			continue
+		}
+
+		name := ch.To.String()
+		if len(filesMap) > 0 && !inFiles(filesMap, name) {
+			continue
+		}
+
+		e, err := t.FindEntry(name)
+		if err != nil {
+			return err
+		}
+		if e.Mode == filemode.Dir || e.Mode == filemode.Submodule {
+			continue
+		}
+		hashes = append(hashes, e.Hash)
+	}
+
+	// backfill drops hashes the repository already has and is a no-op when
+	// no promisor remote is configured, so non-partial repositories pay
+	// nothing for this call.
+	return w.r.backfill(context.Background(), hashes)
 }
 
 func (w *Worktree) checkoutChange(cfg *config.Config, fs *worktreeFilesystem, ch merkletrie.Change, t *object.Tree, idx *indexBuilder) error {

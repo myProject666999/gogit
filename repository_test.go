@@ -1934,10 +1934,24 @@ func (s *RepositorySuite) TestFetchWithFilters() {
 	})
 	s.NoError(err)
 
+	// The local repository's server does not advertise filter support, so
+	// the fetch falls back to an unfiltered one: a complete repository is
+	// better than a partial one whose missing objects have nowhere to come
+	// from. The remote is therefore not recorded as a promisor.
 	err = r.Fetch(&FetchOptions{
 		Filter: packp.FilterBlobNone(),
 	})
-	s.ErrorIs(err, transport.ErrFilterNotSupported)
+	s.NoError(err)
+
+	cfg, err := r.Config()
+	s.NoError(err)
+	s.False(cfg.Remotes[DefaultRemoteName].Promisor)
+	s.Empty(cfg.Remotes[DefaultRemoteName].PartialCloneFilter)
+
+	head, err := r.Reference(plumbing.NewRemoteReferenceName(DefaultRemoteName, "master"), true)
+	s.NoError(err)
+	_, err = r.CommitObject(head.Hash())
+	s.NoError(err)
 }
 
 func (s *RepositorySuite) TestFetchWithFiltersReal() {
@@ -1952,9 +1966,17 @@ func (s *RepositorySuite) TestFetchWithFiltersReal() {
 		Filter: packp.FilterBlobNone(),
 	})
 	s.NoError(err)
-	blob, err := r.BlobObject(plumbing.NewHash("9a48f23120e880dfbe41f7c9b7b708e9ee62a492"))
-	s.NotNil(err)
-	s.Nil(blob)
+
+	// The filter left this blob with the promisor remote, so it is not in
+	// the local object database...
+	h := plumbing.NewHash("9a48f23120e880dfbe41f7c9b7b708e9ee62a492")
+	s.Error(r.Storer.HasEncodedObject(h))
+
+	// ...but reading it backfills it from the promisor remote on demand.
+	blob, err := r.BlobObject(h)
+	s.NoError(err)
+	s.NotNil(blob)
+	s.NoError(r.Storer.HasEncodedObject(h))
 }
 
 func (s *RepositorySuite) TestCloneWithProgress() {
@@ -2322,9 +2344,14 @@ func (s *RepositorySuite) TestCloneWithFilter() {
 		Filter: packp.FilterTreeDepth(0),
 	})
 	s.Require().NoError(err)
-	blob, err := r.BlobObject(plumbing.NewHash("9a48f23120e880dfbe41f7c9b7b708e9ee62a492"))
-	s.Require().Error(err)
-	s.Nil(blob)
+
+	// The filter left this blob with the promisor remote: absent locally,
+	// but fetched on demand when read.
+	h := plumbing.NewHash("9a48f23120e880dfbe41f7c9b7b708e9ee62a492")
+	s.Error(r.Storer.HasEncodedObject(h))
+	blob, err := r.BlobObject(h)
+	s.Require().NoError(err)
+	s.NotNil(blob)
 }
 
 func (s *RepositorySuite) TestPush() {

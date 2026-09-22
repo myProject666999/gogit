@@ -34,7 +34,10 @@ type objectWalker struct {
 
 func newObjectWalker(s storage.Storer) *objectWalker {
 	return &objectWalker{
-		Storer:   s,
+		// The walk computes what is reachable locally, so it reads past the
+		// backfilling wrapper: the absences it meets in a partial clone are
+		// expected and tolerated, not a reason to fetch.
+		Storer:   unwrapPromisorStorer(s),
 		seen:     map[plumbing.Hash]struct{}{},
 		promisor: isPartialClone(s),
 		missing:  map[plumbing.Hash]struct{}{},

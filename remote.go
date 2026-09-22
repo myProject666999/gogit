@@ -459,6 +459,23 @@ func (r *Remote) Fetch(o *FetchOptions) error {
 }
 
 func (r *Remote) fetch(ctx context.Context, o *FetchOptions) (sto storer.ReferenceStorer, err error) {
+	sto, err = r.fetchOnce(ctx, o)
+	if errors.Is(err, transport.ErrFilterNotSupported) && o.Filter != "" {
+		// The server cannot honour the filter. Refetching without it
+		// leaves a complete repository, which is what git does too
+		// ("warning: filtering not recognized by server, ignoring"),
+		// rather than a partial one missing objects it cannot backfill.
+		if o.Progress != nil {
+			fmt.Fprintf(o.Progress, "warning: filtering not recognized by server, ignoring\n")
+		}
+		fallback := *o
+		fallback.Filter = ""
+		return r.fetchOnce(ctx, &fallback)
+	}
+	return sto, err
+}
+
+func (r *Remote) fetchOnce(ctx context.Context, o *FetchOptions) (sto storer.ReferenceStorer, err error) {
 	if trace.Performance.Enabled() {
 		start := time.Now()
 		defer func() {
