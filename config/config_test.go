@@ -939,6 +939,7 @@ func TestMerge(t *testing.T) {
 					Extensions: struct {
 						ObjectFormat   config.ObjectFormat
 						WorktreeConfig bool
+						PartialClone   string
 					}{
 						ObjectFormat:   config.SHA256,
 						WorktreeConfig: true,
@@ -953,6 +954,7 @@ func TestMerge(t *testing.T) {
 				Extensions: struct {
 					ObjectFormat   config.ObjectFormat
 					WorktreeConfig bool
+					PartialClone   string
 				}{
 					ObjectFormat:   config.SHA256,
 					WorktreeConfig: true,

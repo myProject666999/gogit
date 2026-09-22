@@ -41,6 +41,11 @@ var (
 		// noop-v1 does not change git’s behavior at all.
 		// It is useful only for testing format-1 compatibility.
 		"noop-v1": {},
+
+		// partialclone names the remote that promises objects withheld by a
+		// --filter clone. go-git honours it by routing lazy object backfills
+		// to that remote; a repository carrying it is fully supported.
+		"partialclone": {},
 	}
 
 	// Some Git extensions were supported upstream before the introduction

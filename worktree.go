@@ -392,6 +392,14 @@ func (w *Worktree) Reset(opts *ResetOptions) error {
 		return err
 	}
 
+	// Partial clone: bring in, in one batch, every blob this checkout is
+	// about to materialise. Without this each file would lazily fetch on its
+	// own, one request per blob. No-op for full clones and non-fetching
+	// storers.
+	if err := w.r.prefetchTreeBlobs(t); err != nil {
+		return err
+	}
+
 	if len(opts.SparseDirs) > 0 && !opts.SkipSparseDirValidation {
 		if !treeContainsDirs(t, opts.SparseDirs) {
 			return ErrSparseResetDirectoryNotFound

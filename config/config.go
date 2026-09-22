@@ -184,6 +184,11 @@ type Config struct {
 		// When true, each worktree may have a config.worktree file that
 		// overrides settings in the common .git/config.
 		WorktreeConfig bool
+		// PartialClone names the promisor remote of a partial clone. Git
+		// writes it as extensions.partialClone=<remote> when a clone carries
+		// --filter; the named remote's partialclonefilter is the filter later
+		// fetches and lazy object backfills reapply.
+		PartialClone string
 	}
 
 	Protocol struct {
@@ -476,6 +481,7 @@ const (
 	mirrorKey                  = "mirror"
 	promisorKey                = "promisor"
 	partialCloneFilterKey      = "partialclonefilter"
+	partialCloneKey            = "partialClone"
 	versionKey                 = "version"
 	autoCRLFKey                = "autocrlf"
 	fileModeKey                = "filemode"
@@ -568,6 +574,7 @@ func (c *Config) unmarshalExtensions() {
 	s := c.Raw.Section(extensionsSection)
 	c.Extensions.ObjectFormat = format.ObjectFormat(s.Options.Get(objectFormatKey))
 	c.Extensions.WorktreeConfig = strings.EqualFold(s.Options.Get(worktreeConfigKey), "true")
+	c.Extensions.PartialClone = s.Options.Get(partialCloneKey)
 }
 
 func (c *Config) unmarshalTag() {
@@ -822,7 +829,7 @@ func (c *Config) marshalExtensions() {
 	// Only marshal the [extensions] section if there are extension options to write.
 	// This avoids introducing an empty [extensions] section on round-trips.
 	if c.Extensions.ObjectFormat == format.UnsetObjectFormat &&
-		!c.Extensions.WorktreeConfig {
+		!c.Extensions.WorktreeConfig && c.Extensions.PartialClone == "" {
 		return
 	}
 
@@ -833,6 +840,10 @@ func (c *Config) marshalExtensions() {
 
 	if c.Extensions.WorktreeConfig {
 		s.SetOption(worktreeConfigKey, "true")
+	}
+
+	if c.Extensions.PartialClone != "" {
+		s.SetOption(partialCloneKey, c.Extensions.PartialClone)
 	}
 }
 

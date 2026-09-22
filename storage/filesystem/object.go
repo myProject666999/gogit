@@ -72,6 +72,12 @@ type ObjectStorage struct {
 	// runs once per cold-load even under thundering-herd contention.
 	indexSF singleflight.Group
 
+	// missingBatcher coalesces lazy fetches of objects a partial clone's
+	// promisor remote withheld. Its fetch is nil until the repository wires
+	// the promisor remote, so a storage opened standalone never goes to the
+	// network and misses keep failing as they did before.
+	missingBatcher *missingObjectBatcher
+
 	// lastHitPackIdx records the s.packs index that served the most
 	// recent successful findObjectInPackfile probe, encoded as the
 	// slice position plus one (0 = no hint). Storing an Int32 instead
@@ -99,11 +105,44 @@ func NewObjectStorage(dir *dotgit.DotGit, objectCache cache.Object) *ObjectStora
 // NewObjectStorageWithOptions creates a new ObjectStorage with the given .git directory, cache and extra options
 func NewObjectStorageWithOptions(dir *dotgit.DotGit, objectCache cache.Object, ops Options) *ObjectStorage {
 	return &ObjectStorage{
-		options:     ops,
-		objectCache: objectCache,
-		dir:         dir,
-		oh:          plumbing.FromObjectFormat(ops.ObjectFormat),
+		options:        ops,
+		objectCache:    objectCache,
+		dir:            dir,
+		oh:             plumbing.FromObjectFormat(ops.ObjectFormat),
+		missingBatcher: newMissingObjectBatcher(),
 	}
+}
+
+// SetMissingObjectFetcher teaches the storage where objects absent from a
+// partial clone come from. fetch receives the hashes missing in one coalesced
+// batch and must make them readable before it returns. It implements
+// storer.MissingObjectFetchSetter; repositories with a promisor remote wire it
+// on open and clone.
+func (s *ObjectStorage) SetMissingObjectFetcher(fetch func(hashes []plumbing.Hash) error) {
+	s.missingBatcher.setFetch(fetch)
+}
+
+// FetchMissingObjects backfills the given hashes from the promisor remote as
+// one coalesced request. It implements storer.MissingObjectFetcher and is the
+// entry point explicit prefetch call sites use; per-object lazy reads go
+// through fetchMissingIfPartial.
+func (s *ObjectStorage) FetchMissingObjects(hashes []plumbing.Hash) error {
+	return s.missingBatcher.FetchMany(hashes)
+}
+
+// HasEncodedObjectLocal reports local presence without consulting the
+// promisor remote, implementing storer.LocalObjectChecker. Batch prefetch
+// uses it to assemble its request instead of triggering a fetch per probe
+// through HasEncodedObject.
+func (s *ObjectStorage) HasEncodedObjectLocal(h plumbing.Hash) error {
+	return s.hasEncodedObject(h)
+}
+
+// fetchMissingIfPartial asks the promisor remote for h once a lookup proved
+// it absent. In a full clone, or storage without a wired remote, it stays a
+// no-op and the caller keeps its plumbing.ErrObjectNotFound.
+func (s *ObjectStorage) fetchMissingIfPartial(h plumbing.Hash) {
+	s.missingBatcher.Fetch(h)
 }
 
 // initAlternates initializes the cached alternate ObjectStorage instances.
@@ -532,6 +571,18 @@ func (s *ObjectStorage) LazyWriter() (w io.WriteCloser, wh func(typ plumbing.Obj
 // HasEncodedObject returns nil if the object exists, without actually
 // reading the object data from storage.
 func (s *ObjectStorage) HasEncodedObject(h plumbing.Hash) (err error) {
+	err = s.hasEncodedObject(h)
+	if errors.Is(err, plumbing.ErrObjectNotFound) {
+		// Partial clone: the object may be one the promisor remote withheld.
+		// Ask for it once and re-probe; in a full clone the request is a
+		// no-op and the original error stands.
+		s.fetchMissingIfPartial(h)
+		err = s.hasEncodedObject(h)
+	}
+	return err
+}
+
+func (s *ObjectStorage) hasEncodedObject(h plumbing.Hash) (err error) {
 	// Pack-membership-first when the index is healthy: a hit on
 	// the in-memory fanout shortcut avoids a loose Stat. If the
 	// index fails to load (e.g. a corrupt .idx on disk), fall
@@ -598,6 +649,15 @@ func (s *ObjectStorage) packfile(idx idxfile.Index, pack plumbing.Hash) (*packfi
 // EncodedObjectSize returns the plaintext size of the given object,
 // without actually reading the full object data from storage.
 func (s *ObjectStorage) EncodedObjectSize(h plumbing.Hash) (size int64, err error) {
+	size, err = s.encodedObjectSize(h)
+	if errors.Is(err, plumbing.ErrObjectNotFound) {
+		s.fetchMissingIfPartial(h)
+		size, err = s.encodedObjectSize(h)
+	}
+	return size, err
+}
+
+func (s *ObjectStorage) encodedObjectSize(h plumbing.Hash) (size int64, err error) {
 	// Pack-membership-first when the index is healthy: a single
 	// in-memory fanout probe routes packed reads through the pack
 	// reader and skips the loose Stat. If the index fails to load
@@ -644,9 +704,15 @@ func (s *ObjectStorage) EncodedObjectSize(h plumbing.Hash) (size int64, err erro
 // EncodedObject returns the object with the given hash, by searching for it in
 // the packfile and the git object directories.
 func (s *ObjectStorage) EncodedObject(t plumbing.ObjectType, h plumbing.Hash) (plumbing.EncodedObject, error) {
-	var obj plumbing.EncodedObject
-	var err error
+	obj, err := s.encodedObject(t, h)
+	if errors.Is(err, plumbing.ErrObjectNotFound) {
+		s.fetchMissingIfPartial(h)
+		obj, err = s.encodedObject(t, h)
+	}
+	return obj, err
+}
 
+func (s *ObjectStorage) encodedObject(t plumbing.ObjectType, h plumbing.Hash) (obj plumbing.EncodedObject, err error) {
 	// Pack-membership-first when the index is healthy: see
 	// EncodedObjectSize for the routing rationale. The shared
 	// object cache is keyed by hash only — gating the cache
@@ -696,6 +762,15 @@ func (s *ObjectStorage) EncodedObject(t plumbing.ObjectType, h plumbing.Hash) (p
 // DeltaObject returns the object with the given hash, by searching for
 // it in the packfile and the git object directories.
 func (s *ObjectStorage) DeltaObject(t plumbing.ObjectType, h plumbing.Hash) (plumbing.EncodedObject, error) {
+	obj, err := s.deltaObject(t, h)
+	if errors.Is(err, plumbing.ErrObjectNotFound) {
+		s.fetchMissingIfPartial(h)
+		obj, err = s.deltaObject(t, h)
+	}
+	return obj, err
+}
+
+func (s *ObjectStorage) deltaObject(t plumbing.ObjectType, h plumbing.Hash) (plumbing.EncodedObject, error) {
 	obj, err := s.getFromUnpacked(h)
 	if errors.Is(err, plumbing.ErrObjectNotFound) {
 		obj, err = s.getFromPackfile(h, true)

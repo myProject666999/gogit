@@ -49,6 +49,8 @@ func TestRecordPromisor(t *testing.T) {
 		assert.Equal(t, "blob:none", cfg.Remotes[DefaultRemoteName].PartialCloneFilter)
 		assert.EqualValues(t, formatcfg.Version1, cfg.Core.RepositoryFormatVersion,
 			"partial clone is a format extension, so extensions have to be permitted")
+		assert.Equal(t, DefaultRemoteName, cfg.Extensions.PartialClone,
+			"git records extensions.partialClone=<remote> to find the promisor on open")
 
 		// The in-memory view has to agree with what was stored.
 		assert.True(t, rem.Config().Promisor)

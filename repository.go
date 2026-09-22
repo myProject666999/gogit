@@ -296,7 +296,16 @@ func Open(s storage.Storer, worktree billy.Filesystem) (*Repository, error) {
 		return nil, err
 	}
 
-	return newRepository(s, worktree), nil
+	r := newRepository(s, worktree)
+
+	// Partial clones have absent objects by design. Teach capable storers
+	// where to fetch them, lazily, so ordinary object reads heal the
+	// repository instead of failing on what looks like a missing object.
+	if err := wireMissingObjectFetcher(s, cfg); err != nil {
+		return nil, err
+	}
+
+	return r, nil
 }
 
 // Clone a repository into the given Storer and worktree Filesystem with the
@@ -1143,7 +1152,7 @@ func (r *Repository) clone(ctx context.Context, o *CloneOptions) error {
 		}
 	}
 
-	ref, err := r.fetchAndUpdateReferences(ctx, &FetchOptions{
+	fetchOpts := &FetchOptions{
 		RefSpecs:      c.Fetch,
 		Depth:         o.Depth,
 		ClientOptions: o.ClientOptions,
@@ -1151,7 +1160,18 @@ func (r *Repository) clone(ctx context.Context, o *CloneOptions) error {
 		Tags:          o.Tags,
 		RemoteName:    o.RemoteName,
 		Filter:        o.Filter,
-	}, o.ReferenceName)
+	}
+
+	ref, err := r.fetchAndUpdateReferences(ctx, fetchOpts, o.ReferenceName)
+	if err != nil && o.Filter != "" && errors.Is(err, transport.ErrFilterNotSupported) {
+		// Canonical git falls back to a full clone when the server does not
+		// understand --filter (fetch-pack.c: a missing "filter" capability
+		// clears filter_options and retries the same request). Retrying with
+		// no filter leaves a complete repository: no promisor config is
+		// recorded, no pack is marked, and later reads never hit the network.
+		fetchOpts.Filter = ""
+		ref, err = r.fetchAndUpdateReferences(ctx, fetchOpts, o.ReferenceName)
+	}
 
 	hr, err1 := r.Storer.Reference(plumbing.HEAD)
 	if err1 == nil && hr.Target() == plumbing.Invalid {
@@ -1164,6 +1184,18 @@ func (r *Repository) clone(ctx context.Context, o *CloneOptions) error {
 
 	err = r.setWorktreeAndStoragePaths()
 	if err != nil {
+		return err
+	}
+
+	// Wire the lazy object fetcher before the checkout below, which is the
+	// first thing to touch the blobs a filtered clone withheld. A full clone,
+	// including one taken through the filter-unsupported fallback, has no
+	// promisor recorded so this is a no-op.
+	fetchedCfg, err := r.Config()
+	if err != nil {
+		return err
+	}
+	if err := wireMissingObjectFetcher(r.Storer, fetchedCfg); err != nil {
 		return err
 	}
 

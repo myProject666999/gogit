@@ -30,6 +30,10 @@ func getPatchContext(ctx context.Context, message string, changes ...*Change) (*
 		return &Patch{message: message}, nil
 	}
 
+	if err := prefetchChangeBlobs(changes); err != nil {
+		return nil, err
+	}
+
 	filePatches := make([]fdiff.FilePatch, 0, len(changes))
 	for _, c := range changes {
 		select {

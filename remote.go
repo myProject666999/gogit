@@ -812,6 +812,15 @@ func (r *Remote) recordPromisor(filter packp.Filter) error {
 
 	remote.PartialCloneFilter = string(filter)
 
+	// extensions.partialClone names the remote that promises the withheld
+	// objects. Git writes it the first time a partial clone registers its
+	// remote (list-objects-filter-options.c partial_clone_register) and reads
+	// it on open to find where lazy fetches go. Record it the same once, and
+	// leave a pre-existing value for another remote alone.
+	if cfg.Extensions.PartialClone == "" {
+		cfg.Extensions.PartialClone = r.c.Name
+	}
+
 	if err := r.s.SetConfig(cfg); err != nil {
 		return err
 	}
